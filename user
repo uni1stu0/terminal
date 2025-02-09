@@ -1,0 +1,159 @@
+import telebot
+import sqlite3
+import random
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
+
+TOKEN = "7396998219:AAGnwPeuG8GYad2zB6gT8Kdsb96RVDB6CQU"
+ADMIN_ID = 7710860810  # ضع معرفك هنا
+
+bot = telebot.TeleBot(TOKEN)
+
+# إنشاء قاعدة بيانات
+conn = sqlite3.connect("users.db", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS waiting_users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        country TEXT
+    )
+""")
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS active_chats (
+        user1 INTEGER,
+        user2 INTEGER
+    )
+""")
+conn.commit()
+
+# دالة لإنشاء كيبورد الأزرار
+def main_menu():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    btn1 = KeyboardButton("🔍 العثور على شريك")
+    btn2 = KeyboardButton("🛑 إنهاء المحادثة")
+    markup.add(btn1, btn2)
+    return markup
+
+# دالة لإضافة المستخدم لقائمة الانتظار
+def add_to_waiting(user_id, username, country):
+    cursor.execute("INSERT OR REPLACE INTO waiting_users (user_id, username, country) VALUES (?, ?, ?)", 
+                   (user_id, username, country))
+    conn.commit()
+
+# دالة لحذف المستخدم من قائمة الانتظار
+def remove_from_waiting(user_id):
+    cursor.execute("DELETE FROM waiting_users WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+# دالة للبحث عن شريك محادثة من بلد مختلف
+def find_partner(user_id, username, user_country):
+    cursor.execute("SELECT * FROM waiting_users WHERE country != ? LIMIT 1", (user_country,))
+    partner = cursor.fetchone()
+    if partner:
+        partner_id = partner[0]
+        remove_from_waiting(partner_id)
+        remove_from_waiting(user_id)
+        cursor.execute("INSERT INTO active_chats (user1, user2) VALUES (?, ?)", (user_id, partner_id))
+        conn.commit()
+        return partner_id
+    return None
+
+# دالة للحصول على الشريك الحالي
+def get_partner(user_id):
+    cursor.execute("SELECT * FROM active_chats WHERE user1 = ? OR user2 = ?", (user_id, user_id))
+    chat = cursor.fetchone()
+    if chat:
+        return chat[1] if chat[0] == user_id else chat[0]
+    return None
+
+# دالة لإنهاء المحادثة
+def end_chat(user_id):
+    cursor.execute("DELETE FROM active_chats WHERE user1 = ? OR user2 = ?", (user_id, user_id))
+    conn.commit()
+
+# أمر بدء البوت
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.send_message(
+        message.chat.id, 
+        "مرحبًا! اضغط على **🔍 العثور على شريك** لبدء الدردشة.\n\nيرجى إرسال **رمز بلدك** (🇺🇸 🇪🇬 🇸🇦) أولًا.",
+        reply_markup=main_menu()
+    )
+
+# استقبال اسم الدولة لبدء البحث
+@bot.message_handler(func=lambda message: len(message.text) == 2)
+def receive_country(message):
+    user_id = message.chat.id
+    username = message.from_user.username or f"User_{user_id}"
+    country = message.text
+    partner_id = find_partner(user_id, username, country)
+
+    if partner_id:
+        bot.send_message(user_id, "✅ تم العثور على شريك! يمكنك الآن الدردشة.", reply_markup=main_menu())
+        bot.send_message(partner_id, "✅ تم العثور على شريك! يمكنك الآن الدردشة.", reply_markup=main_menu())
+    else:
+        add_to_waiting(user_id, username, country)
+        bot.send_message(user_id, "⏳ جارٍ البحث عن شريك من دولة أخرى...", reply_markup=main_menu())
+
+# عند الضغط على زر "🔍 العثور على شريك"
+@bot.message_handler(func=lambda message: message.text == "🔍 العثور على شريك")
+def find_chat_partner(message):
+    bot.send_message(message.chat.id, "🎯 أرسل **رمز بلدك** (مثل 🇺🇸 أو 🇸🇦) للبحث عن شريك محادثة.")
+
+# استقبال الرسائل ونقلها بين المستخدمين
+@bot.message_handler(func=lambda message: True)
+def chat(message):
+    user_id = message.chat.id
+    partner_id = get_partner(user_id)
+
+    if partner_id:
+        bot.send_message(partner_id, message.text)
+    else:
+        bot.send_message(user_id, "❌ ليس لديك شريك حاليًا. اضغط **🔍 العثور على شريك** للبدء.")
+
+# عند الضغط على زر "🛑 إنهاء المحادثة"
+@bot.message_handler(func=lambda message: message.text == "🛑 إنهاء المحادثة")
+def stop_chat(message):
+    user_id = message.chat.id
+    partner_id = get_partner(user_id)
+
+    if partner_id:
+        bot.send_message(partner_id, "⚠️ تم إنهاء المحادثة من قبل الطرف الآخر.", reply_markup=main_menu())
+        bot.send_message(user_id, "✅ تم إنهاء المحادثة.", reply_markup=main_menu())
+        end_chat(user_id)
+    else:
+        bot.send_message(user_id, "❌ ليس لديك محادثة نشطة.", reply_markup=main_menu())
+
+# أمر /users - يسمح فقط للمسؤول برؤية القائمة
+@bot.message_handler(commands=['users'])
+def list_users(message):
+    if message.chat.id != ADMIN_ID:
+        bot.send_message(message.chat.id, "❌ ليس لديك صلاحية لاستخدام هذا الأمر.")
+        return
+    
+    cursor.execute("SELECT username, country FROM waiting_users")
+    waiting_users = cursor.fetchall()
+    
+    cursor.execute("SELECT user1, user2 FROM active_chats")
+    active_chats = cursor.fetchall()
+    
+    user_list = "📋 **قائمة المستخدمين:**\n\n"
+    
+    if waiting_users:
+        user_list += "🟢 **في الانتظار:**\n"
+        for user in waiting_users:
+            user_list += f"- @{user[0]} ({user[1]})\n"
+    else:
+        user_list += "❌ لا يوجد مستخدمون في الانتظار.\n"
+    
+    if active_chats:
+        user_list += "\n🔵 **المحادثات النشطة:**\n"
+        for chat in active_chats:
+            user_list += f"- {chat[0]} 🔄 {chat[1]}\n"
+    else:
+        user_list += "\n❌ لا توجد محادثات نشطة.\n"
+
+    bot.send_message(ADMIN_ID, user_list, parse_mode="Markdown")
+
+# تشغيل البوت
+bot.polling()
